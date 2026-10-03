@@ -1,0 +1,96 @@
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background-color: #f4f4f4;
+  color: #2a0303;
+  line-height: 1.6;
+}
+header {
+  background-color: #2a0303;
+  color: white;
+  text-align: center;
+  padding: 24px;
+}
+nav {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+}
+
+nav a {
+  color: white;
+  text-decoration: none;
+  transition: 0.3s;
+}
+
+nav a:hover {
+  text-decoration: underline;
+}
+main {
+  max-width: 1000px;
+  margin: 30px auto;
+  padding: 0 20px;
+}
+section {
+  background-color: white;
+  padding: 20px;
+  margin-bottom: 20px;
+  border-radius: 8px;
+}
+.features {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  padding: 0;
+  list-style: none;
+}
+
+.features li {
+  background-color: #f4f4f4;
+  padding: 20px;
+  border-radius: 8px;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th,
+td {
+  border: 1px solid #ccc;
+  padding: 10px;
+  text-align: left;
+}
+form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+input,
+textarea {
+  width: 100%;
+  padding: 10px;
+}
+
+textarea {
+  min-height: 120px;
+}
+button {
+  padding: 10px 16px;
+  background-color: #2a0303;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+}
+button {
+  transition: 0.3s;
+}
+
+button:hover {
+  opacity: 0.8;
+}
