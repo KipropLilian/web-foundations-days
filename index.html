@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickNotes | Notes Manager</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>QuickNotes</h1>
+        <p>Your simple personal notes manager</p>
+      </div>
+    </header>
+
+    <main class="container">
+      <section class="note-form-section">
+        <h2>Create a note</h2>
+
+        <form id="note-form" novalidate>
+          <label for="note-text">Note</label>
+          <textarea
+            id="note-text"
+            placeholder="What would you like to remember?"
+            maxlength="200"
+            required
+          ></textarea>
+          <p id="validation-message" role="alert"></p>
+
+          <label for="note-category">Category</label>
+          <select id="note-category" required>
+            <option value="">Choose a category</option>
+            <option value="personal">Personal</option>
+            <option value="work">Work</option>
+            <option value="study">Study</option>
+          </select>
+
+          <button type="submit">Add note</button>
+        </form>
+      </section>
+
+      <section class="notes-section">
+        <h2>Your notes</h2>
+
+        <label for="search-input">Search notes</label>
+        <input
+          type="search"
+          id="search-input"
+          placeholder="Search note text..."
+        />
+
+        <p id="notes-summary">0 notes</p>
+        <div id="notes-list" class="notes-list"></div>
+        <p id="empty-message">No notes yet. Create your first note!</p>
+      </section>
+    </main>
+  </body>
+</html>
