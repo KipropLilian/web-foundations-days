@@ -1,287 +1,160 @@
+# Day 7 Assignment: Scaling a Photo-Sharing App
 
-# SnapShare: Photo App Scaling Design
+## 1. Goals and assumptions
 
-## 1. Context and Requirements
+The system must let users upload photos, browse feeds, and view images reliably as traffic grows. The design separates request handling from image processing and stores binary images in object storage rather than relational database rows.
 
-SnapShare is a photo-sharing application where users upload photos, view feeds, follow other users, and interact with posts. The system must support high traffic, store large volumes of images, and deliver feeds quickly during peak periods.
+For capacity planning, use the daily totals already calculated earlier in this assignment. Convert daily traffic to rates using 86,400 seconds per day, then apply the required 5× peak multiplier.
 
-### Functional Requirements
+Let:
+- `U` = number of photo uploads per day.
+- `F` = number of feed views per day.
+- `S` = average original photo size in MB.
+- `T` = average thumbnail size in MB.
 
-- Users can upload photos and add captions.
-- Users can follow other users and view their feeds.
-- Users can like and comment on photos.
-- Users can view photos and thumbnails.
-- Users can retrieve their own photos and profile information.
-
-### Non-Functional Requirements
-
-- **Scalability:** Handle increasing numbers of users, uploads, and feed requests.
-- **Availability:** Keep core functionality available when individual components fail.
-- **Performance:** Load feeds and thumbnails quickly.
-- **Durability:** Prevent uploaded photos from being lost.
-- **Security:** Authenticate users and authorize access to private content.
-
-## 2. Traffic and Storage Estimates
-
-The following estimates are planning assumptions rather than measured production data.
-
-### Assumptions
-
-- Registered users: 10 million.
-- Daily active users (DAU): 1 million.
-- Feed items viewed per active user per day: 50.
-- Photo uploads per active user per day: 1.
-- Average original photo size: 2 MB.
-- Average thumbnail size: 0.05 MB.
-- Days per year: 365.
-
-### Daily Traffic
-
-**Feed requests**
-
-1,000,000 daily active users × 50 feed items per day = 50 million feed-item views per day.
-
-**Photo uploads**
-
-1,000,000 daily active users × 1 upload per day = 1 million uploads per day.
-
-**Read-to-upload ratio**
-
-50 million feed-item views ÷ 1 million uploads = 50:1.
-
-The application is read-heavy: feed viewing generates approximately 50 times as many item views as there are daily uploads. The architecture should therefore scale feed delivery independently from photo uploads.
-
-### Storage Estimates
-
-**Original photos**
-
-1,000,000 uploads/day × 2 MB × 365 days = 730,000,000 MB, or approximately 730 TB per year using decimal storage units.
-
-**Thumbnails**
-
-1,000,000 uploads/day × 0.05 MB × 365 days = 18,250,000 MB, or approximately 18.25 TB per year.
-
-**Total new image storage**
-
-730 TB + 18.25 TB = **748.25 TB per year**, approximately 748 TB.
-
-This estimate excludes database records, replicas, backups, temporary files, and additional image sizes. Actual storage requirements will depend on retention policies, compression, and upload growth.
-
-Binary image files should be stored in object storage rather than directly in relational database rows. The database stores photo metadata and object keys, while object storage handles the large files.
-
-## 3. High-Level Architecture
+## 2. Architecture
 
 ```text
-                  Mobile App / Web Client
-                            |
-                            v
-                     CDN / Edge Cache
-                            |
-                            v
-                      Load Balancer
-                            |
-                            v
-                       API Gateway
-                            |
-              +-------------+-------------+
-              |             |             |
-              v             v             v
-         User Service   Feed Service   Upload Service
-              |             |             |
-              v             v             v
-         User Database  Feed Cache    Object Storage
-                            |          (Original Photos)
-                            v                 |
-                      Read Replicas           v
-                                       Message Queue
-                                              |
-                                              v
-                                      Background Workers
-                                              |
-                                              v
-                                      Thumbnail Storage
-                                              |
-                                              v
-                                         CDN Cache
+Mobile/Web Client
+       |
+       v
+ CDN / Edge Cache ------------------------------+
+       |                                        |
+       v                                        |
+ Load Balancer                                  |
+       |                                        |
+       v                                        |
+ API Gateway                                    |
+   |       |          |            |             |
+   v       v          v            v             |
+User    Feed       Upload       Photo Metadata   |
+Service Service    Service      (Relational DB)  |
+   |       |          |                         |
+   |       |          v                         |
+   |       |     Object Storage <----------------+
+   |       |          |
+   |       |          v
+   |       |      Message Queue
+   |       |          |
+   |       |          v
+   |       |     Thumbnail Workers
+   |       |          |
+   |       |          v
+   |       +----> Thumbnail Object Storage
+   |
+   +----> User Database
+
+Feed Service may use a cache and read replicas for high-volume reads.
 ```
 
-### Component Descriptions
+### Component responsibilities
 
-**1. Client applications**
+1. **CDN / edge cache:** Delivers cached images, thumbnails, static assets, and cacheable public content from locations closer to users. Cache misses go to the origin. Private images must use access-controlled URLs or signed URLs.
+2. **Load balancer:** Distributes incoming requests across healthy API instances, performs health checks, and stops sending traffic to unhealthy instances.
+3. **API gateway:** Provides a common entry point for routing, authentication enforcement, rate limiting, request validation, and request tracing. It should not perform expensive image transformations.
+4. **User service:** Manages accounts, profiles, authentication-related data, and user permissions.
+5. **Feed service:** Retrieves posts and feed metadata, applies visibility rules, and returns paginated feed results. It can use caching and read replicas for read-heavy workloads.
+6. **Upload service:** Authorizes uploads, validates metadata and file limits, creates an upload record, and issues a short-lived pre-signed object-storage upload URL. The client can upload image bytes directly to object storage rather than sending large files through the API servers.
+7. **Photo metadata database:** Stores structured records such as photo ID, owner ID, object key, content type, dimensions, processing status, timestamps, and visibility. It stores metadata, not the full binary image. Relational storage supports constraints and queries without making database backups and replication carry every image byte.
+8. **Object storage:** Stores original images and generated thumbnails as durable objects. It supports high-capacity storage and object keys; lifecycle policies can move older originals to cheaper storage where appropriate.
+9. **Message queue:** Receives a durable `PhotoUploaded` job/event after the original is stored and its metadata record is created. It buffers bursts and decouples upload requests from slower processing.
+10. **Thumbnail workers:** Consume queued jobs, decode and validate the image, generate appropriately sized thumbnails and optimized formats, write them to object storage, and update processing status. Workers can scale horizontally based on queue depth.
+11. **Cache / read replicas:** Reduce repeated feed and metadata reads. Cached data is not the authority for permissions or upload status; stale entries must expire or be invalidated.
 
-Mobile and web clients allow users to upload photos, browse feeds, and interact with posts. Clients communicate with backend services through authenticated API requests.
+## 3. Photo upload lifecycle
 
-**2. CDN and edge cache**
+1. The client authenticates and asks the Upload Service to start an upload, sending metadata such as file name, content type, size, and an idempotency key.
+2. The service validates the user, allowed format, maximum size, quota, and request. It creates a photo record with status `UPLOADING` and returns a short-lived pre-signed upload URL.
+3. The client uploads the original image directly to object storage over HTTPS. The API servers do not need to proxy the full binary payload.
+4. The client or object-storage event confirms that the upload completed. The service verifies the object exists and checks its size/type; where appropriate, it verifies a checksum and performs malware/content validation.
+5. The service marks the photo as `PROCESSING` and publishes a durable `PhotoUploaded` message containing the photo ID and object key. The message should be published only after the object and metadata are safely recorded. A transactional outbox or retryable event publisher can prevent an event from being lost after a database commit.
+6. The API returns promptly with the photo ID and a processing status. The user does not have to wait for thumbnail generation to finish before the upload request completes.
+7. A thumbnail worker consumes the message, downloads the original, decodes it safely, applies orientation correction, and generates required thumbnail sizes and optimized formats.
+8. The worker writes the thumbnails to object storage using deterministic keys so retries do not create uncontrolled duplicates. It updates metadata to `READY` and emits a completion event if needed.
+9. The feed and photo APIs expose the photo according to product rules. Until thumbnails are ready, the UI can show a placeholder or the original where appropriate.
+10. If processing fails, the message is retried with backoff. After the configured retry limit, it goes to a dead-letter queue for investigation. Idempotent workers make repeated delivery safe; monitoring tracks queue depth, oldest-message age, failures, and processing latency.
 
-A Content Delivery Network (CDN) caches public or appropriately authorized image content near users. It reduces repeated requests to the origin storage and lowers image-loading latency. Private images require suitable authorization and cache controls.
+## 4. Traffic calculations: average and peak rates
 
-**3. Load balancer**
+There are 86,400 seconds in one day. The 5× multiplier is applied to the average rate to estimate peak demand.
 
-The load balancer distributes incoming requests across healthy application instances. Multiple instances allow the system to handle more traffic and continue operating when an instance fails.
+### Upload requests
 
-**4. API gateway**
+- Daily uploads: `U` uploads/day.
+- Average upload rate: `U ÷ 86,400` uploads/second.
+- Estimated peak upload rate: `(U ÷ 86,400) × 5` uploads/second.
 
-The gateway provides a common entry point for backend APIs. It can enforce authentication, rate limits, request validation, and routing to the correct service.
+### Feed views
 
-**5. User service**
+- Daily feed views: `F` feed views/day.
+- Average feed-view rate: `F ÷ 86,400` views/second.
+- Estimated peak feed-view rate: `(F ÷ 86,400) × 5` views/second.
 
-The user service manages profiles, account details, and follow relationships. It reads and writes user-related records in the database.
+**Worked example (illustrative only):** If the planning assumptions are 200,000 uploads/day and 2,000,000 feed views/day:
 
-**6. Feed service**
+| Traffic | Daily total | Average per second | Peak per second (5×) |
+|---|---:|---:|---:|
+| Uploads | 200,000 | 200,000 ÷ 86,400 = **2.31** | 2.31 × 5 = **11.57** |
+| Feed views | 2,000,000 | 2,000,000 ÷ 86,400 = **23.15** | 23.15 × 5 = **115.74** |
 
-The feed service retrieves posts relevant to a user, applies visibility and ranking rules, and returns paginated feed results. A cache can store frequently requested feed data to reduce repeated database queries.
+Replace the illustrative daily totals in this table with the exact daily upload and feed-view totals calculated earlier in the assignment if they differ. Do not change the formulas. These are request-rate estimates; image bandwidth must also be estimated using object sizes and cache-hit ratios.
 
-**7. Upload service**
+### Bandwidth implication
 
-The upload service authenticates the user, validates upload requests, and coordinates photo storage and metadata creation. It can issue a time-limited presigned upload URL so the client uploads large image files directly to object storage.
+If an upload averages `S` MB, approximate peak original-image ingress is:
 
-**8. Relational database and read replicas**
+`Peak uploads/second × S MB × 8 = megabits/second (Mbps)`
 
-The primary database stores structured information such as users, posts, captions, likes, comments, and object keys. Read replicas serve eligible read queries and reduce pressure on the primary database.
+This is a simplified estimate before protocol overhead and retries. For feed delivery, multiply feed image requests per second by average delivered image size, then account for CDN cache hits. A high CDN hit rate reduces origin bandwidth and object-storage reads.
 
-**9. Object storage**
+## 5. Storage strategy
 
-Object storage holds original photos and generated thumbnails. It is designed for durable, scalable storage of large binary files and avoids placing image data directly in database rows.
+Store original images and generated thumbnails in object storage; store only searchable metadata and object keys in the relational database.
 
-**10. Message queue**
+If `U` photos are uploaded per day, with average original size `S` MB and thumbnail size `T` MB:
 
-The queue stores background-processing jobs, such as generating thumbnails. It separates upload requests from slower processing tasks and allows workers to process jobs asynchronously.
+- Daily new image storage = `U × (S + T)` MB/day.
+- Annual new image storage = `U × (S + T) × 365` MB/year.
 
-**11. Background workers**
+Use consistent units when converting MB to GB/TB. The estimate excludes replicas, backups, versioning, and temporary processing copies unless those are explicitly included. Apply lifecycle policies and retention rules, and monitor storage growth. Avoid storing binary blobs in relational tables because this increases database size, backup/restore time, replication traffic, and pressure on database I/O.
 
-Workers consume queued jobs, generate appropriately sized thumbnails, and save the results to object storage. More workers can be added when the queue grows.
+## 6. Architectural trade-offs
 
-**12. Monitoring and logging**
+### Trade-off 1: Eventual consistency on feed reads vs. strongly consistent reads
 
-Monitoring tracks API latency, error rates, upload failures, queue depth, worker processing time, storage usage, and database performance. Alerts help the team detect and resolve problems before they significantly affect users.
+Read replicas and caches reduce load on the primary database and improve feed response time, but replication lag or stale cache entries can mean a newly uploaded photo does not appear immediately.
 
-## 4. Step-by-Step Photo Upload Flow
+**Decision:** Use replicas/caches for ordinary feed browsing and tolerate a short delay, with pagination and cache invalidation/short TTLs. Use the primary database for operations that require authoritative state, such as upload ownership, privacy changes, deletion, and permission checks. The UI can show `PROCESSING` until the photo is ready rather than promising immediate visibility.
 
-1. **User initiates an upload.** The client sends an authenticated request to the upload service with the photo's metadata, such as its caption and file type.
+### Trade-off 2: Pre-generating thumbnails vs. generating them on demand
 
-2. **Request validation.** The upload service verifies the user's identity, checks permissions, validates the file type and size, and applies upload limits.
+Pre-generating thumbnails uses storage and background compute even for images that may rarely be viewed, but makes first views faster and avoids repeated transformations. Generating on demand saves storage for unpopular size variants but adds latency and compute at request time, especially during traffic spikes.
 
-3. **Upload authorization.** The service creates an upload record with a pending status and returns a short-lived presigned URL for the original photo.
+**Decision:** Pre-generate the common thumbnail sizes and formats asynchronously. Generate uncommon variants on demand only if usage data justifies it, and cache the result. Monitor thumbnail storage, worker cost, and cache-hit rate.
 
-4. **Direct file upload.** The client uploads the image directly to object storage using the presigned URL. This avoids sending large image data through the application server and reduces server bandwidth.
+### Trade-off 3: Direct-to-object-storage uploads vs. proxying uploads through the API
 
-5. **Upload confirmation.** The client or storage event confirms completion. The backend verifies that the object exists and updates the upload record to reflect that the original has been stored.
+Direct uploads reduce API bandwidth and server load, but require short-lived signed URLs, careful validation, and handling incomplete uploads. Proxying uploads is simpler to reason about initially but makes application servers handle large payloads and can increase latency and cost.
 
-6. **Queue a processing job.** The backend publishes a message containing the photo ID and object key to the message queue. The message instructs a worker to generate thumbnails.
+**Decision:** Use pre-signed direct uploads with short expiry, strict object-key scope, size/type validation, and server-side verification after upload.
 
-7. **Background processing.** A worker retrieves the message, downloads or reads the original photo, generates the required thumbnail sizes, and stores them in object storage.
+### Trade-off 4: Asynchronous image processing vs. synchronous processing
 
-8. **Update photo status.** The worker records the thumbnail object keys and marks processing as complete. Failed jobs can be retried, with dead-letter handling for jobs that repeatedly fail.
+Synchronous processing can make a photo immediately available in every size, but it increases request latency and makes API capacity depend on image-processing cost. Asynchronous processing improves responsiveness and absorbs bursts, but introduces queue delay, retries, and temporary `PROCESSING` states.
 
-9. **Make the photo available.** The feed service can include the photo once its publication rules are satisfied. The client can initially show a processing state if thumbnails are not ready.
+**Decision:** Process thumbnails asynchronously with idempotent workers, bounded retries, a dead-letter queue, and a clear processing status in the API.
 
-10. **Serve future views.** When another user requests the feed, the feed service returns photo metadata and image URLs. The CDN serves cached images where permitted; cache misses are served from object storage.
+## 7. Reliability, security, and monitoring
 
-### Failure Handling
-
-- If an upload fails, the client can retry without creating duplicate posts.
-- Upload and processing operations should be idempotent so retries do not create duplicate records or thumbnails.
-- If a worker fails, the queue retains or redelivers the job according to its retry policy.
-- If thumbnail generation is delayed, the original can remain stored while the system reports a pending processing status.
-- Monitoring alerts operators to persistent upload failures, growing queues, or unavailable storage.
-
-## 5. Handling High Traffic
-
-### Horizontal Scaling
-
-Application services should run as multiple instances behind a load balancer. Instances can scale independently according to request volume and resource usage.
-
-### Caching
-
-Frequently requested feed data and image content can be cached. The CDN is particularly useful for image delivery, while an application cache can reduce repeated feed and metadata queries.
-
-Cache invalidation and authorization must be considered when posts are edited, deleted, or made private.
-
-### Database Optimization
-
-- Add indexes for common queries, such as retrieving posts by user and creation time.
-- Use pagination rather than returning an entire feed at once.
-- Use read replicas for eligible read-heavy workloads.
-- Keep writes on the primary database unless a deliberately designed alternative is used.
-- Monitor slow queries, connection counts, replication lag, and storage growth.
-
-### Asynchronous Processing
-
-Thumbnail generation and other non-essential work should run in background workers rather than delaying the upload request. Worker capacity can increase when queue depth rises.
-
-### Object Storage and CDN
-
-Original photos and thumbnails belong in object storage. A CDN reduces repeated origin requests and distributes image traffic across edge locations.
-
-### Peak Traffic
-
-Daily averages do not capture sudden surges caused by popular events or viral posts. The system should be load-tested against expected peak requests per second, with additional capacity for application servers, caches, queues, and databases.
-
-## 6. Architectural Trade-Offs
-
-### Trade-Off 1: Direct Uploads vs. Uploading Through Application Servers
-
-**Direct uploads to object storage**
-
-Advantages:
-- Reduce application server bandwidth consumption.
-- Support large files efficiently.
-- Allow application services to scale separately from image transfer.
-
-Disadvantages:
-- Require secure presigned URL management.
-- Need upload-completion verification and cleanup of abandoned uploads.
-- Make the upload flow more complex.
-
-**Decision:** Use direct uploads to object storage, with short-lived upload permissions and backend verification.
-
-### Trade-Off 2: Synchronous vs. Asynchronous Thumbnail Generation
-
-**Synchronous processing** generates thumbnails before the upload request finishes. It offers a simpler immediate completion flow but increases response times and ties up application resources.
-
-**Asynchronous processing** places a job on a queue and lets background workers generate thumbnails. It improves upload responsiveness and supports independent worker scaling, but introduces processing delays and more operational complexity.
-
-**Decision:** Use asynchronous processing because thumbnail generation does not need to block the initial file upload.
-
-### Trade-Off 3: Read Replicas vs. Strongly Consistent Reads
-
-Read replicas improve read throughput and can reduce load on the primary database. However, replication is often asynchronous, so a recent upload or profile update might not immediately appear when a subsequent read is served by a replica.
-
-This is an example of **eventual consistency**: replica data catches up over time, but it may temporarily be stale.
-
-**Decision:** Use replicas for feed browsing and other read-heavy queries where brief delays are acceptable. For actions that require the latest state, such as verifying a transaction or enforcing a critical write constraint, use the primary database or another mechanism that guarantees the required consistency.
-
-### Trade-Off 4: Precomputed Feeds vs. On-Demand Feed Generation
-
-Precomputed feeds can make reads fast because feed entries are prepared in advance. However, writing each new post into many followers' feeds can create substantial write amplification for users with many followers.
-
-On-demand feed generation reduces fan-out writes but can make reads more expensive because the service must combine posts at request time.
-
-**Decision:** Use a hybrid strategy. Precompute feeds for ordinary accounts and consider on-demand retrieval for accounts with exceptionally large follower counts. Measure the resulting read latency and write load before tuning the approach.
-
-### Trade-Off 5: Cache Performance vs. Freshness
-
-Caching improves latency and reduces backend load, but cached feeds and images can become stale after edits, deletions, or visibility changes.
-
-**Decision:** Use explicit cache expiration and invalidation rules. Apply stricter controls to private or deleted content, and avoid relying on cached data for security-sensitive authorization decisions.
-
-## 7. Risks and Monitoring
-
-| Risk | Mitigation | Monitoring |
-|---|---|---|
-| Sudden traffic spikes | Autoscaling, rate limiting, load testing | Requests per second, latency |
-| Queue backlog | Scale workers, retry failed jobs safely | Queue depth, job age |
-| Database overload | Indexing, caching, read replicas | CPU, connections, slow queries |
-| Replication lag | Route consistency-sensitive reads appropriately | Replica lag |
-| Failed photo uploads | Retry support, verification, cleanup jobs | Upload success rate |
-| Thumbnail failures | Idempotent workers, retries, dead-letter queue | Processing errors |
-| High storage costs | Lifecycle policies, compression, retention rules | Storage growth and cost |
-| Unauthorized image access | Access controls, signed URLs, correct CDN policies | Access-denied events, security logs |
-
-The system should also track feed latency percentiles, image-delivery latency, cache-hit ratio, error rates, and availability. These metrics help identify bottlenecks and guide capacity planning.
+- Require authentication and check authorization for private photos on every relevant read.
+- Use short-lived pre-signed URLs and avoid exposing permanent write permissions to clients.
+- Validate file type, size, dimensions, and image decoding; do not trust the client-provided MIME type alone.
+- Make upload creation and worker processing idempotent to handle retries.
+- Use database transactions or an outbox pattern so metadata and processing events are not silently separated.
+- Monitor request rate, p95/p99 latency, upload failures, object-storage errors, CDN cache-hit ratio, database CPU/connections, queue depth, oldest queued job, worker failure rate, and time from upload to `READY`.
+- Alert on sustained queue growth, elevated 5xx responses, slow thumbnail generation, or abnormal storage growth.
+- Test at the calculated 5× peak rates and include bursts, slow storage, duplicate queue messages, worker crashes, and retry scenarios.
 
 ## Conclusion
 
-SnapShare can scale by separating API services, structured metadata, image storage, and background processing. Object storage handles large photos, a CDN improves image delivery, caching reduces repeated reads, and read replicas help serve a read-heavy workload. A message queue and background workers keep thumbnail generation out of the critical upload path.
-
-The estimated annual image-storage requirement is approximately **748 TB**, based on 1 million uploads per day, 2 MB original photos, and 0.05 MB thumbnails. These estimates provide a starting point for capacity planning and should be validated through load testing and actual usage metrics.
+The system scales by keeping API services stateless where possible, serving image bytes from a CDN and object storage, and processing thumbnails asynchronously through a durable queue and horizontally scalable workers. Average and peak rates are calculated from daily totals using 86,400 seconds per day and the required 5× multiplier. The design deliberately accepts limited feed staleness and asynchronous processing in exchange for lower read latency and faster upload responses, while preserving authoritative permission checks and reliable processing.
