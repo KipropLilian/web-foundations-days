@@ -1,0 +1,91 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>QuickNotes - User Directory</title>
+    <script src="users.js" defer></script>
+    <style>
+      body {
+        max-width: 800px;
+        margin: 40px auto;
+        padding: 0 20px;
+        font-family: Arial, sans-serif;
+        color: #2a0303;
+        background: #f8f5f5;
+      }
+
+      button,
+      input {
+        padding: 10px;
+        font: inherit;
+      }
+
+      button {
+        color: white;
+        background: #2a0303;
+        border: 0;
+        border-radius: 5px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      input {
+        width: 100%;
+        box-sizing: border-box;
+        margin: 8px 0 16px;
+      }
+
+      #status {
+        min-height: 1.5em;
+      }
+
+      #users-list {
+        padding: 0;
+        list-style: none;
+      }
+
+      #users-list li {
+        margin: 12px 0;
+        padding: 16px;
+        background: white;
+        border-left: 4px solid #2a0303;
+        border-radius: 5px;
+        overflow-wrap: anywhere;
+      }
+
+      #users-list h2 {
+        margin-top: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>User Directory</h1>
+      <p>Load, view, and filter users from a REST API.</p>
+    </header>
+
+    <main>
+      <button id="load-users" type="button">Load users</button>
+
+      <p id="status" role="status" aria-live="polite">
+        Click "Load users" to retrieve the directory.
+      </p>
+
+      <label for="filter-input">Filter users by name</label>
+      <input
+        id="filter-input"
+        type="search"
+        placeholder="Type a name..."
+        autocomplete="off"
+      />
+
+      <ul id="users-list"></ul>
+    </main>
+  </body>
+</html>
